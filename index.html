@@ -9,16 +9,17 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- Firebase Libraries -->
-    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js" type="module"></script>
-    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js" type="module"></script>
-    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js" type="module"></script>
+    
+    <!-- 変更点：絶対に動く頑丈なFirebaseの読み込み方（Compat版） -->
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-compat.js"></script>
+
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Kiwi+Maru:wght@400;500;900&display=swap');
         body { font-family: 'Kiwi Maru', serif; }
         .animate-pop { animation: pop 0.8s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
         @keyframes pop { 0% { transform: translate(-50%, -40%) scale(0.5); opacity: 0; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
-        /* スクロールバーを少し可愛く */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
@@ -28,11 +29,8 @@
 <body class="bg-[#FFF0F5]">
     <div id="root"></div>
 
-    <script type="module" data-presets="react,stage-3">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, onSnapshot, setDoc, addDoc, collection, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
+    <!-- type="text/babel" に戻したよ。これで真っ白エラーは起きない -->
+    <script type="text/babel">
         const { useState, useEffect } = React;
 
         // --- Firebase Config (まお専用の鍵！) ---
@@ -45,11 +43,10 @@
             appId: "1:753564778745:web:e0a0878cc84cb32333e228"
         };
         
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        // 今回は特定のプロジェクトに直接繋ぐので、ルート直下に保存します。
-        // （Vercelなどの外部ホスティングで動かすため、Canvasの制約ルールから外してシンプルに実装します）
+        // Firebaseの起動
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
 
         // --- Icons ---
         const Icon = ({ name, size = 24, className = "" }) => {
@@ -84,52 +81,46 @@
             const [tasks, setTasks] = useState([]);
             const [history, setHistory] = useState([]);
             
-            // UI State
             const [newTaskTitle, setNewTaskTitle] = useState('');
             const [newTaskPoints, setNewTaskPoints] = useState(10);
             const [popText, setPopText] = useState(null);
             const [showHistory, setShowHistory] = useState(false);
             
-            // フリー入力用 State
             const [freePoints, setFreePoints] = useState('');
             const [freeReason, setFreeReason] = useState('');
 
             // 1. Auth Setup
             useEffect(() => {
-                const initAuth = async () => {
-                    await signInAnonymously(auth);
-                };
-                initAuth();
-                const unsub = onAuthStateChanged(auth, setUser);
+                auth.signInAnonymously().catch(err => console.error("Auth Error", err));
+                const unsub = auth.onAuthStateChanged(u => setUser(u));
                 return () => unsub();
             }, []);
 
-            // 2. Data Sync Setup (Firebaseとの通信)
+            // 2. Data Sync Setup
             useEffect(() => {
                 if (!user) return;
 
                 // プロフィールの同期
-                const profilesRef = doc(db, 'neko_point_app', 'family_data');
-                const unsubProfiles = onSnapshot(profilesRef, (snap) => {
-                    if (snap.exists()) {
+                const profilesRef = db.doc('neko_point_app/family_data');
+                const unsubProfiles = profilesRef.onSnapshot((snap) => {
+                    if (snap.exists) {
                         const data = snap.data();
                         setKids(data.kids || kids);
                         setIsSetupComplete(data.isSetupComplete || false);
                     } else {
-                        // 初回起動時
-                        setDoc(profilesRef, { kids, isSetupComplete: false });
+                        profilesRef.set({ kids, isSetupComplete: false });
                     }
                 }, (err) => console.error(err));
 
                 // ミッションの同期
-                const tasksRef = collection(db, 'neko_point_app', 'family_data', 'tasks');
-                const unsubTasks = onSnapshot(tasksRef, (snap) => {
+                const tasksRef = db.collection('neko_point_app/family_data/tasks');
+                const unsubTasks = tasksRef.onSnapshot((snap) => {
                     setTasks(snap.docs.map(d => ({ id: d.id, ...d.data() })));
                 }, (err) => console.error(err));
 
                 // 履歴の同期
-                const historyRef = collection(db, 'neko_point_app', 'family_data', 'history');
-                const unsubHistory = onSnapshot(historyRef, (snap) => {
+                const historyRef = db.collection('neko_point_app/family_data/history');
+                const unsubHistory = historyRef.onSnapshot((snap) => {
                     const logs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                     setHistory(logs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)).slice(0, 50));
                 }, (err) => console.error(err));
@@ -143,8 +134,7 @@
 
             const updateCloudKids = async (newKids, setupStatus = isSetupComplete) => {
                 if (!user) return;
-                const profilesRef = doc(db, 'neko_point_app', 'family_data');
-                await setDoc(profilesRef, { kids: newKids, isSetupComplete: setupStatus }, { merge: true });
+                await db.doc('neko_point_app/family_data').set({ kids: newKids, isSetupComplete: setupStatus }, { merge: true });
             };
 
             const addPoints = async (kidId, amount, reason) => {
@@ -159,12 +149,12 @@
                 const newKids = kids.map(k => k.id === kidId ? { ...k, points: k.points + amount } : k);
                 await updateCloudKids(newKids);
 
-                await addDoc(collection(db, 'neko_point_app', 'family_data', 'history'), {
+                await db.collection('neko_point_app/family_data/history').add({
                     kidName: kid.name,
                     kidEmoji: kid.emoji,
                     amount,
                     reason,
-                    timestamp: serverTimestamp()
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
                 });
             };
 
@@ -179,15 +169,15 @@
 
             const completeMission = async (task) => {
                 await addPoints(activeKidId, task.points, `ミッション: ${task.title}`);
-                await deleteDoc(doc(db, 'neko_point_app', 'family_data', 'tasks', task.id));
+                await db.doc(`neko_point_app/family_data/tasks/${task.id}`).delete();
             };
 
             const handleAddMission = async () => {
                 if (!newTaskTitle.trim() || !user) return;
-                await addDoc(collection(db, 'neko_point_app', 'family_data', 'tasks'), {
+                await db.collection('neko_point_app/family_data/tasks').add({
                     title: newTaskTitle,
                     points: Number(newTaskPoints),
-                    timestamp: serverTimestamp()
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
                 });
                 setNewTaskTitle('');
             };
