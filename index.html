@@ -3,28 +3,55 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ねこポイント - お小遣い管理</title>
+    <title>ねこポイント - 家族で共有</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Firebase Libraries -->
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js" type="module"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js" type="module"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js" type="module"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Kiwi+Maru:wght@400;500;900&display=swap');
         body { font-family: 'Kiwi Maru', serif; }
         .animate-pop { animation: pop 0.8s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
         @keyframes pop { 0% { transform: translate(-50%, -40%) scale(0.5); opacity: 0; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
+        /* スクロールバーを少し可愛く */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
 </head>
 <body class="bg-[#FFF0F5]">
     <div id="root"></div>
 
-    <script type="text/babel">
+    <script type="module" data-presets="react,stage-3">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, addDoc, collection, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
         const { useState, useEffect } = React;
 
+        // --- Firebase Config (まお専用の鍵！) ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyDXfZKICqr2IEFYaunHkGJ-_KmMuu8LV3M",
+            authDomain: "neko-point.firebaseapp.com",
+            projectId: "neko-point",
+            storageBucket: "neko-point.firebasestorage.app",
+            messagingSenderId: "753564778745",
+            appId: "1:753564778745:web:e0a0878cc84cb32333e228"
+        };
+        
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        // 今回は特定のプロジェクトに直接繋ぐので、ルート直下に保存します。
+        // （Vercelなどの外部ホスティングで動かすため、Canvasの制約ルールから外してシンプルに実装します）
+
+        // --- Icons ---
         const Icon = ({ name, size = 24, className = "" }) => {
             useEffect(() => { lucide.createIcons(); }, []);
             return <i data-lucide={name} style={{ width: size, height: size }} className={className}></i>;
@@ -38,6 +65,7 @@
             { id: 'purple', bg: 'bg-purple-100', border: 'border-purple-300', text: 'text-purple-500', active: 'bg-purple-400 text-white', inactive: 'text-purple-300 hover:bg-purple-50' },
         ];
 
+        // --- カスタムがんばりボタン ---
         const QUICK_ACTIONS = [
             { label: 'ねこトイレ', pt: 30, emoji: '🐈‍⬛' },
             { label: '靴揃え', pt: 5, emoji: '👟' },
@@ -46,6 +74,7 @@
         ];
 
         const App = () => {
+            const [user, setUser] = useState(null);
             const [isSetupComplete, setIsSetupComplete] = useState(false);
             const [kids, setKids] = useState([
                 { id: 'kid1', name: '', emoji: '🐱', colorId: 'pink', points: 0 },
@@ -55,60 +84,111 @@
             const [tasks, setTasks] = useState([]);
             const [history, setHistory] = useState([]);
             
+            // UI State
             const [newTaskTitle, setNewTaskTitle] = useState('');
             const [newTaskPoints, setNewTaskPoints] = useState(10);
             const [popText, setPopText] = useState(null);
             const [showHistory, setShowHistory] = useState(false);
             
+            // フリー入力用 State
             const [freePoints, setFreePoints] = useState('');
             const [freeReason, setFreeReason] = useState('');
 
-            // --- ローカルストレージでの保存（共有はできないが確実に動く） ---
+            // 1. Auth Setup
             useEffect(() => {
-                const saved = localStorage.getItem('neko-data-local');
-                if (saved) {
-                    const parsed = JSON.parse(saved);
-                    setKids(parsed.kids || kids);
-                    setTasks(parsed.tasks || []);
-                    setHistory(parsed.history || []);
-                    setIsSetupComplete(parsed.isSetupComplete || false);
-                }
+                const initAuth = async () => {
+                    await signInAnonymously(auth);
+                };
+                initAuth();
+                const unsub = onAuthStateChanged(auth, setUser);
+                return () => unsub();
             }, []);
 
+            // 2. Data Sync Setup (Firebaseとの通信)
             useEffect(() => {
-                localStorage.setItem('neko-data-local', JSON.stringify({ kids, tasks, history, isSetupComplete }));
-            }, [kids, tasks, history, isSetupComplete]);
+                if (!user) return;
 
-            const addPoints = (kidId, amount, reason) => {
-                if (isNaN(amount) || amount === 0) return;
+                // プロフィールの同期
+                const profilesRef = doc(db, 'neko_point_app', 'family_data');
+                const unsubProfiles = onSnapshot(profilesRef, (snap) => {
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        setKids(data.kids || kids);
+                        setIsSetupComplete(data.isSetupComplete || false);
+                    } else {
+                        // 初回起動時
+                        setDoc(profilesRef, { kids, isSetupComplete: false });
+                    }
+                }, (err) => console.error(err));
+
+                // ミッションの同期
+                const tasksRef = collection(db, 'neko_point_app', 'family_data', 'tasks');
+                const unsubTasks = onSnapshot(tasksRef, (snap) => {
+                    setTasks(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+                }, (err) => console.error(err));
+
+                // 履歴の同期
+                const historyRef = collection(db, 'neko_point_app', 'family_data', 'history');
+                const unsubHistory = onSnapshot(historyRef, (snap) => {
+                    const logs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    setHistory(logs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)).slice(0, 50));
+                }, (err) => console.error(err));
+
+                return () => {
+                    unsubProfiles();
+                    unsubTasks();
+                    unsubHistory();
+                };
+            }, [user]);
+
+            const updateCloudKids = async (newKids, setupStatus = isSetupComplete) => {
+                if (!user) return;
+                const profilesRef = doc(db, 'neko_point_app', 'family_data');
+                await setDoc(profilesRef, { kids: newKids, isSetupComplete: setupStatus }, { merge: true });
+            };
+
+            const addPoints = async (kidId, amount, reason) => {
+                if (!user || isNaN(amount) || amount === 0) return;
+                
                 const kid = kids.find(k => k.id === kidId);
+                if (!kid) return;
+
                 setPopText(`${kid.emoji} ${kid.name} ${amount > 0 ? '+' : ''}${amount}pt`);
                 setTimeout(() => setPopText(null), 1200);
 
-                setKids(prev => prev.map(k => k.id === kidId ? { ...k, points: k.points + amount } : k));
-                setHistory(prev => [{
-                    id: Date.now().toString(),
+                const newKids = kids.map(k => k.id === kidId ? { ...k, points: k.points + amount } : k);
+                await updateCloudKids(newKids);
+
+                await addDoc(collection(db, 'neko_point_app', 'family_data', 'history'), {
                     kidName: kid.name,
                     kidEmoji: kid.emoji,
                     amount,
                     reason,
-                    timestamp: new Date().getTime()
-                }, ...prev].slice(0, 50));
+                    timestamp: serverTimestamp()
+                });
             };
 
-            const handleFinishSetup = () => {
-                setKids(kids.map((k, i) => ({ ...k, name: k.name.trim() || `プレイヤー${i + 1}` })));
+            const handleFinishSetup = async () => {
+                const updatedKids = kids.map((kid, i) => ({
+                    ...kid,
+                    name: kid.name.trim() === '' ? `プレイヤー${i + 1}` : kid.name
+                }));
+                await updateCloudKids(updatedKids, true);
                 setIsSetupComplete(true);
             };
 
-            const completeMission = (task) => {
-                addPoints(activeKidId, task.points, `ミッション: ${task.title}`);
-                setTasks(prev => prev.filter(t => t.id !== task.id));
+            const completeMission = async (task) => {
+                await addPoints(activeKidId, task.points, `ミッション: ${task.title}`);
+                await deleteDoc(doc(db, 'neko_point_app', 'family_data', 'tasks', task.id));
             };
 
-            const handleAddMission = () => {
-                if (!newTaskTitle.trim()) return;
-                setTasks(prev => [...prev, { id: Date.now().toString(), title: newTaskTitle, points: Number(newTaskPoints) }]);
+            const handleAddMission = async () => {
+                if (!newTaskTitle.trim() || !user) return;
+                await addDoc(collection(db, 'neko_point_app', 'family_data', 'tasks'), {
+                    title: newTaskTitle,
+                    points: Number(newTaskPoints),
+                    timestamp: serverTimestamp()
+                });
                 setNewTaskTitle('');
             };
 
@@ -122,13 +202,18 @@
                 }
             };
 
+            if (!user) return <div className="h-screen flex items-center justify-center text-pink-400 font-bold">繋いでるにゃ...🐾</div>;
+
             if (!isSetupComplete) {
                 return (
                     <div className="min-h-screen p-6 flex flex-col items-center justify-center">
                         <div className="bg-white p-8 rounded-[2rem] shadow-xl w-full max-w-md">
                             <div className="text-center mb-8">
-                                <div className="inline-block bg-pink-100 p-3 rounded-full mb-3 text-pink-500"><Icon name="cat" size={32} /></div>
-                                <h1 className="text-2xl font-black text-gray-800">プロフィールのせってい</h1>
+                                <div className="inline-block bg-pink-100 p-3 rounded-full mb-3 text-pink-500">
+                                    <Icon name="cat" size={32} />
+                                </div>
+                                <h1 className="text-2xl font-black text-gray-800">家族の設定</h1>
+                                <p className="text-xs text-gray-400 mt-1">みんなの端末に反映されるにゃ！</p>
                             </div>
                             <div className="space-y-6">
                                 {kids.map((kid, index) => (
@@ -145,7 +230,7 @@
                                     </div>
                                 ))}
                             </div>
-                            <button onClick={handleFinishSetup} className="w-full mt-8 bg-gray-800 text-white font-bold py-4 rounded-xl shadow-lg active:scale-95 transition-all">はじめる！</button>
+                            <button onClick={handleFinishSetup} className="w-full mt-8 bg-gray-800 text-white font-bold py-4 rounded-xl shadow-lg active:scale-95 transition-all">共有を開始する！</button>
                         </div>
                     </div>
                 );
@@ -153,6 +238,7 @@
 
             const activeKid = kids.find(k => k.id === activeKidId) || kids[0];
             const theme = COLORS.find(c => c.id === activeKid.colorId) || COLORS[0];
+            
             const maxPoints = Math.max(...kids.map(k => k.points));
             const leaders = kids.filter(k => k.points === maxPoints && k.points > 0);
 
@@ -169,12 +255,13 @@
                             <Icon name="cat" className="text-pink-400" /> ねこポイント
                         </div>
                         <div className="flex gap-3">
-                            <button onClick={() => setShowHistory(true)} className="p-2 text-gray-400 hover:bg-gray-100 rounded-full"><Icon name="history" size={20} /></button>
-                            <button onClick={() => setIsSetupComplete(false)} className="p-2 text-gray-400 hover:bg-gray-100 rounded-full"><Icon name="settings" size={20} /></button>
+                            <button onClick={() => setShowHistory(true)} className="p-2 text-gray-400 hover:bg-gray-100 rounded-full active:scale-95"><Icon name="history" size={20} /></button>
+                            <button onClick={() => setIsSetupComplete(false)} className="p-2 text-gray-400 hover:bg-gray-100 rounded-full active:scale-95"><Icon name="settings" size={20} /></button>
                         </div>
                     </header>
 
                     <main className="max-w-md mx-auto p-4 space-y-6">
+                        
                         <div className="bg-white rounded-[2rem] p-6 shadow-md border-b-4 border-gray-200 flex justify-around relative">
                             {kids.map(k => {
                                 const isLeader = leaders.some(l => l.id === k.id);
@@ -206,7 +293,7 @@
                             <h2 className="text-xs font-bold text-gray-400 pl-2 uppercase tracking-wider flex items-center gap-1">
                                 <Icon name="paw-print" size={14} className={theme.text} /> がんばりボタン
                             </h2>
-                            <div className="grid grid-cols-2 gap-3">
+                            <div className="grid grid-cols-2 gap-3 animate-in fade-in duration-300" key={activeKidId}>
                                 {QUICK_ACTIONS.map(b => (
                                     <button key={b.label} onClick={() => addPoints(activeKidId, b.pt, b.label)} className={`bg-white p-4 rounded-2xl border-2 ${theme.border} text-left h-28 flex flex-col justify-between active:scale-95 transition-all shadow-sm hover:shadow-md group`}>
                                         <div className="flex justify-between items-start">
@@ -222,19 +309,37 @@
                         <div className={`bg-white rounded-2xl p-4 shadow-sm border border-gray-100 relative overflow-hidden`}>
                              <div className={`absolute top-0 left-0 w-1 h-full ${theme.bg}`}></div>
                              <div className="flex gap-2 items-center">
-                                 <input type="text" className="flex-1 bg-gray-50 rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-gray-200" placeholder="その他の理由..." value={freeReason} onChange={e => setFreeReason(e.target.value)} />
+                                 <input 
+                                     type="text" 
+                                     className="flex-1 bg-gray-50 rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-gray-200" 
+                                     placeholder="その他の理由..." 
+                                     value={freeReason} 
+                                     onChange={e => setFreeReason(e.target.value)} 
+                                 />
                                  <div className="relative">
-                                     <input type="number" className="w-20 bg-gray-50 rounded-lg p-3 pr-6 text-sm text-center font-bold outline-none focus:ring-2 focus:ring-gray-200" placeholder="数字" value={freePoints} onChange={e => setFreePoints(e.target.value)} />
+                                     <input 
+                                         type="number" 
+                                         className="w-20 bg-gray-50 rounded-lg p-3 pr-6 text-sm text-center font-bold outline-none focus:ring-2 focus:ring-gray-200" 
+                                         placeholder="数字"
+                                         value={freePoints} 
+                                         onChange={e => setFreePoints(e.target.value)} 
+                                     />
                                      <span className="absolute right-2 top-1/2 transform -translate-y-1/2 text-[10px] text-gray-400 font-bold">pt</span>
                                  </div>
-                                 <button onClick={handleFreeAdd} disabled={!freePoints} className={`flex-shrink-0 w-12 h-12 rounded-xl flex items-center justify-center text-white active:scale-95 transition-all shadow-sm disabled:opacity-50 ${theme.active}`}>
+                                 <button 
+                                     onClick={handleFreeAdd}
+                                     disabled={!freePoints}
+                                     className={`flex-shrink-0 w-12 h-12 rounded-xl flex items-center justify-center text-white active:scale-95 transition-all shadow-sm disabled:opacity-50 ${theme.active}`}
+                                 >
                                      <Icon name="plus" size={20} />
                                  </button>
                              </div>
                         </div>
 
                         <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 space-y-4">
-                            <h2 className="font-bold text-gray-700 flex items-center gap-2 border-l-4 border-gray-300 pl-2 text-sm">大人のオーダー</h2>
+                            <h2 className="font-bold text-gray-700 flex items-center gap-2 border-l-4 border-gray-300 pl-2 text-sm">
+                                大人のオーダー
+                            </h2>
                             <div className="space-y-2">
                                 {tasks.length === 0 && <div className="text-center text-xs text-gray-400 py-6 bg-gray-50 rounded-xl">ミッション受付中にゃ🐾</div>}
                                 {tasks.map(t => (
@@ -249,6 +354,7 @@
                                     </div>
                                 ))}
                             </div>
+                            
                             <div className="pt-5 border-t border-gray-100 space-y-2 mt-2">
                                 <input className="w-full bg-gray-50 rounded-lg p-3 text-sm outline-none border border-transparent focus:border-gray-300" placeholder="窓拭き など..." value={newTaskTitle} onChange={e => setNewTaskTitle(e.target.value)} />
                                 <div className="flex gap-2">
@@ -256,7 +362,7 @@
                                         <input type="number" className="w-24 bg-gray-50 rounded-lg p-3 pr-6 text-sm text-center font-bold outline-none border border-transparent focus:border-gray-300" value={newTaskPoints} onChange={e => setNewTaskPoints(e.target.value)} />
                                         <span className="absolute right-2 top-1/2 transform -translate-y-1/2 text-[10px] text-gray-400 font-bold">pt</span>
                                     </div>
-                                    <button onClick={handleAddMission} className="flex-1 bg-gray-800 text-white font-bold rounded-lg text-sm active:scale-95 transition-colors shadow-sm">追加</button>
+                                    <button onClick={handleAddMission} className="flex-1 bg-gray-800 hover:bg-gray-900 text-white font-bold rounded-lg text-sm active:scale-95 transition-colors shadow-sm">ミッション追加</button>
                                 </div>
                             </div>
                         </div>
@@ -267,7 +373,7 @@
                             <div className="bg-white rounded-t-[2rem] h-[75vh] flex flex-col overflow-hidden shadow-2xl animate-in slide-in-from-bottom duration-300">
                                 <div className="p-6 border-b border-gray-100 flex justify-between items-center sticky top-0 bg-white">
                                     <h3 className="font-black text-lg text-gray-800 flex items-center gap-2"><Icon name="history" className="text-gray-400" /> がんばり記録</h3>
-                                    <button onClick={() => setShowHistory(false)} className="bg-gray-100 text-gray-500 px-4 py-2 rounded-full font-bold text-xs hover:bg-gray-200">とじる</button>
+                                    <button onClick={() => setShowHistory(false)} className="bg-gray-100 text-gray-500 px-4 py-2 rounded-full font-bold text-xs hover:bg-gray-200 active:scale-95">とじる</button>
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-gray-50/50">
                                     {history.map(h => (
@@ -277,7 +383,7 @@
                                                     <span>{h.kidEmoji}</span> <span>{h.reason}</span>
                                                 </div>
                                                 <div className="text-[10px] text-gray-400 mt-0.5">
-                                                    {h.kidName} • {new Date(h.timestamp).toLocaleString('ja-JP', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}
+                                                    {h.kidName} • {h.timestamp ? new Date(h.timestamp.seconds * 1000).toLocaleString('ja-JP', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '今'}
                                                 </div>
                                             </div>
                                             <div className={`font-black text-lg ${h.amount > 0 ? 'text-pink-500' : 'text-gray-400'} flex-shrink-0 bg-gray-50 px-2 py-1 rounded-lg`}>
